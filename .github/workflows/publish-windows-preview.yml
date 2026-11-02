@@ -1,0 +1,52 @@
+name: Publish verified Windows preview
+
+on:
+  workflow_dispatch:
+    inputs:
+      verification_context:
+        description: 'JSON containing exact source, artifact digest, and completed backend verification'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-preview-publication
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify existing candidate without rebuilding
+        env:
+          VERIFICATION_CONTEXT: ${{ inputs.verification_context }}
+          SIGNED_ARTIFACT_URL: ${{ secrets.WINDOWS_CANDIDATE_URL }}
+        run: python3 scripts/prepare-windows-preview.py
+      - name: Upload verified assets and publish preview
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          version=$(python3 -c 'import json; print(json.load(open("staging/context.json"))["version"])')
+          tag="v${version}-windows"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo 'Release already exists; no existing asset will be overwritten.'
+            exit 1
+          fi
+          gh release create "$tag" \
+            "staging/Melogen.Desktop.Setup-${version}-x64.exe" \
+            "staging/verification-${version}-windows.json" \
+            --draft --prerelease --latest=false --target "$GITHUB_SHA" \
+            --title "Melogen Desktop ${version} Windows Public Preview" \
+            --notes-file staging/release-notes.md
+          gh api "repos/$GH_REPO/releases/tags/$tag" > staging/upload-receipt.json
+          python3 scripts/prepare-windows-preview.py --verify-upload
+          gh release edit "$tag" --draft=false --prerelease --latest=false
+          gh release view "$tag" --json url,isDraft,isPrerelease
